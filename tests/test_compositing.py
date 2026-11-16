@@ -314,5 +314,313 @@ def test_concatenate_with_masks(util):
     )
 
 
+# ---------------------------------------------------------------------------
+# Deterministic, reproducible frame compositing
+# ---------------------------------------------------------------------------
+
+# One distinct solid color per frame index, so the frame a clip is sampled on
+# can be read straight from the pixel value.
+_STEP_COLORS = {
+    chr(65 + i): (10 * (i % 20) + 5, 10 * (i % 20) + 5, 10 * (i % 20) + 5)
+    for i in range(26)
+}
+
+
+def _step_clip(fps, n_frames, start=0.0):
+    """A 1x1 clip whose frame `i` has a unique, frame-index-encoded color."""
+    frames = [[[chr(65 + i)]] for i in range(n_frames)]
+    return BitmapClip(frames, fps=fps, color_dict=_STEP_COLORS).with_start(start)
+
+
+def _step_color(index):
+    return _STEP_COLORS[chr(65 + (index % 20))]
+
+
+def test_composite_frame_snapped_to_clip_fps_grid():
+    """A clip with a start offset is sampled on its own frame grid.
+
+    At composite time ``t`` the clip must show its frame
+    ``round((t - start) * fps)`` even when floating point drift makes the raw
+    product land just below an integer (e.g. ``(0.7 - 0.2) * 10 == 4.999...``).
+    """
+    start, fps = 0.2, 10
+    clip = _step_clip(fps, 10, start=start)
+    composite = CompositeVideoClip([clip], size=(1, 1))
+
+    # (t - start) * fps is 4.999999999999999 here: without snapping, int()
+    # would select frame 4 instead of the expected frame 5.
+    t = 0.7
+    assert (t - start) * fps < 5  # the drift actually happens
+    frame = composite.get_frame(t)
+    assert tuple(int(v) for v in frame[0, 0]) == _step_color(5)
+
+
+def test_composite_different_fps_first_frame_alignment():
+    """Clips with different fps and start offsets each keep their own grid."""
+    clip_10fps = _step_clip(10, 10, start=0.0)
+    clip_7fps = _step_clip(7, 7, start=0.3).with_position((0, 0))
+    composite = CompositeVideoClip(
+        [clip_10fps, clip_7fps], size=(1, 1), bg_color=(0, 0, 0)
+    )
+
+    # Sample at composite times deliberately chosen to drift below integer
+    # frame boundaries for at least one of the two clips.
+    expectations = {
+        0.30: (3, 0),  # (0.30-0.0)*10 -> frame 3, (0.30-0.3)*7 -> frame 0
+        0.70: (7, 2),  # (0.70-0.0)*10 drifts to 6.999.., (0.70-0.3)*7 -> 2.8
+        0.90: (9, 4),
+    }
+    for t, (idx_10, idx_7) in expectations.items():
+        # Top clip (7 fps) wins because it is last in the same layer.
+        frame = composite.get_frame(t)
+        assert tuple(int(v) for v in frame[0, 0]) == _step_color(idx_7), t
+
+        # Reading each clip through the composite's time mapping gives the
+        # frame expected from its own grid.
+        assert composite._clip_time(clip_10fps, t) == idx_10 / 10
+        assert composite._clip_time(clip_7fps, t) == idx_7 / 7
+
+
+def test_composite_same_pixels_independent_of_read_order():
+    """Reading frames out of order must not change any returned frame.
+
+    The sampled times include floating point drift boundaries, so this also
+    pins each result to the frame dictated by the clip's own start/fps grid.
+    """
+    clip1 = _step_clip(10, 10, start=0.0)
+    clip2 = _step_clip(7, 7, start=0.3).with_position((0, 0))
+    composite = CompositeVideoClip([clip1, clip2], size=(1, 1), bg_color=(0, 0, 0))
+
+    # t=0.7 -> (0.7-0.0)*10 drifts to 6.999.. and (0.7-0.3)*7 = 2.799..
+    # t=0.9 -> (0.9-0.3)*7 drifts to 4.199.. while 0.05-grid times cover the rest
+    times = [0.0, 0.1, 0.3, 0.5, 0.7, 0.9]
+    forward = {t: composite.get_frame(t).copy() for t in times}
+    shuffled = {t: composite.get_frame(t).copy() for t in reversed(times)}
+
+    for t in times:
+        np.testing.assert_array_equal(
+            forward[t], shuffled[t], err_msg=f"frame differs at t={t}"
+        )
+
+    # Explicit expected frame of the top (7 fps, start 0.3) clip at each time.
+    expected_top_frame = {
+        0.0: None,  # clip2 not playing yet (starts at 0.3)
+        0.1: None,
+        0.3: 0,
+        0.5: 1,
+        0.7: 2,
+        0.9: 4,
+    }
+    for t, idx in expected_top_frame.items():
+        if idx is None:
+            continue
+        assert tuple(int(v) for v in forward[t][0, 0]) == _step_color(idx), t
+
+
+def test_composite_mask_same_pixels_independent_of_read_order():
+    """The memoized mask must always be the fully composited one."""
+    clip1 = _step_clip(10, 10).with_position((0, 0)).with_mask()
+    clip2 = _step_clip(10, 10).with_position((1, 0)).with_mask()
+    composite = CompositeVideoClip([clip1, clip2], size=(2, 1), bg_color=None)
+
+    times = [0.1, 0.3, 0.5, 0.7, 0.9]
+
+    # Reference masks computed standalone, before any RGB frame is requested.
+    reference = CompositeVideoClip(
+        [
+            _step_clip(10, 10).with_position((0, 0)).with_mask(),
+            _step_clip(10, 10).with_position((1, 0)).with_mask(),
+        ],
+        size=(2, 1),
+        bg_color=None,
+    )
+    expected_masks = {t: reference.mask.get_frame(t).copy() for t in times}
+
+    # Drive the RGB path. The memoized entry must always be the complete,
+    # final mask rather than an intermediate mask captured mid-compositing.
+    for t in times:
+        composite.get_frame(t)
+        np.testing.assert_allclose(composite.mask.precomputed[t], expected_masks[t])
+
+    # Reading the masks back in a different order returns the same pixels.
+    for t in reversed(times):
+        np.testing.assert_allclose(
+            composite.mask.get_frame(t),
+            expected_masks[t],
+            err_msg=f"mask differs at t={t}",
+        )
+
+
+def test_composite_memoized_mask_never_partial_during_blit():
+    """No intermediate (partial) mask may ever be cached while blitting.
+
+    The historical implementation wrote ``precomputed[t]`` after each clip,
+    so the cache briefly held the mask with only the first clip applied. That
+    partial value could be observed by another frame read and made the output
+    depend on read order. This test spies on the cache through a wrapper around
+    ``compose_on`` and fails as soon as a partial entry is stored.
+    """
+    clip1 = _step_clip(10, 10).with_position((0, 0)).with_mask()
+    clip2 = _step_clip(10, 10).with_position((1, 0)).with_mask()
+    composite = CompositeVideoClip([clip1, clip2], size=(2, 1), bg_color=None)
+    t = 0.5
+
+    full_mask = CompositeVideoClip(
+        [
+            _step_clip(10, 10).with_position((0, 0)).with_mask(),
+            _step_clip(10, 10).with_position((1, 0)).with_mask(),
+        ],
+        size=(2, 1),
+        bg_color=None,
+    ).mask.get_frame(t)
+
+    import inspect
+
+    seen_cached_masks = []
+    original_compose_on = clip2.compose_on
+    accepts_frame_t = "frame_t" in inspect.signature(original_compose_on).parameters
+
+    def spy(background, ct, background_mask, frame_t=None):
+        if accepts_frame_t:
+            result = original_compose_on(
+                background, ct, background_mask, frame_t=frame_t
+            )
+        else:
+            result = original_compose_on(background, ct, background_mask)
+        # Record whatever is cached for this time after a blit. On a correct
+        # implementation every such entry must already be the complete mask
+        # (no partial, mid-compositing mask is ever cached).
+        cached = composite.mask.precomputed.get(t)
+        if cached is not None:
+            seen_cached_masks.append(cached.copy())
+        return result
+
+    clip2.compose_on = spy
+    composite.get_frame(t)
+
+    # The final cache entry exists and is complete...
+    assert t in composite.mask.precomputed
+    np.testing.assert_allclose(composite.mask.precomputed[t], full_mask)
+    # ...and nothing partial was ever observable during the blits.
+    for cached in seen_cached_masks:
+        np.testing.assert_allclose(cached, full_mask)
+
+
+def test_composite_reproducible_across_runs():
+    """Fresh composites built from the same clips yield identical frames.
+
+    Times include floating point drift boundaries so reproducibility is
+    asserted on the exact frame each clip's own start/fps grid prescribes.
+    """
+
+    def build():
+        clip1 = _step_clip(10, 10, start=0.0).with_mask()
+        clip2 = _step_clip(7, 7, start=0.3).with_position((0, 0)).with_mask()
+        return CompositeVideoClip([clip1, clip2], size=(1, 1), bg_color=None)
+
+    times = [0.0, 0.1, 0.3, 0.5, 0.7, 0.9]
+    first = build()
+    rgb_runs = [[build().get_frame(t).copy() for t in times] for _ in range(3)]
+    mask_runs = [[build().mask.get_frame(t).copy() for t in times] for _ in range(3)]
+
+    for run in rgb_runs[1:]:
+        for i, t in enumerate(times):
+            np.testing.assert_array_equal(
+                rgb_runs[0][i], run[i], err_msg=f"rgb differs at t={t}"
+            )
+    for run in mask_runs[1:]:
+        for i, t in enumerate(times):
+            np.testing.assert_allclose(
+                mask_runs[0][i], run[i], err_msg=f"mask differs at t={t}"
+            )
+
+    # Sanity check: the reference object matches every fresh run too and the
+    # pixels correspond to the expected top-clip frame on its own grid.
+    expected_top_frame = {0.3: 0, 0.5: 1, 0.7: 2, 0.9: 4}
+    for i, t in enumerate(times):
+        np.testing.assert_array_equal(first.get_frame(t), rgb_runs[0][i])
+        if t in expected_top_frame:
+            assert tuple(int(v) for v in rgb_runs[0][i][0, 0]) == _step_color(
+                expected_top_frame[t]
+            )
+
+
+def test_composite_deterministic_with_memoize_mask_disabled():
+    """Determinism must hold with mask memoization switched off as well."""
+    times = [round(0.05 * i, 3) for i in range(20)]
+
+    def build():
+        clip1 = _step_clip(10, 10).with_mask()
+        clip2 = _step_clip(7, 7).with_start(0.3).with_position((0, 0))
+        clip2 = clip2.with_mask()
+        return CompositeVideoClip(
+            [clip1, clip2],
+            size=(1, 1),
+            bg_color=None,
+            memoize_mask=False,
+        )
+
+    composite = build()
+    forward = {t: composite.get_frame(t).copy() for t in times}
+    shuffled = {t: composite.get_frame(t).copy() for t in reversed(times)}
+    for t in times:
+        np.testing.assert_array_equal(forward[t], shuffled[t])
+        assert not hasattr(composite.mask, "precomputed")
+
+
+def test_composite_use_bgclip_snapped_to_background_grid():
+    """The background clip is sampled on its own start/fps grid too."""
+    # Background at 6 fps; foreground is fully opaque and only 0.4 s long so
+    # it has ended at the sampled time and only the background is visible.
+    background = _step_clip(6, 6).with_start(0.2)
+    foreground = _step_clip(4, 2).with_start(0.2)  # ends at 0.2 + 0.5 = 0.7
+    composite = CompositeVideoClip(
+        [background, foreground], size=(1, 1), use_bgclip=True
+    )
+
+    # (0.7 - 0.2) * 6 drifts to 2.9999... just below the exact frame boundary.
+    t = 0.7
+    raw = (t - 0.2) * 6
+    assert int(raw) != int(round(raw))  # floating point drift is present
+    expected_index = int(round(raw))  # frame 3
+    # The background resolves to its own grid frame.
+    np.testing.assert_array_equal(
+        composite.bg.get_frame(composite._clip_time(composite.bg, t)),
+        background.get_frame(expected_index / 6.0),
+    )
+    frame = composite.get_frame(t)
+    assert tuple(int(v) for v in frame[0, 0]) == _step_color(expected_index)
+
+    # Independent rebuilds give identical pixels.
+    rebuilt = CompositeVideoClip(
+        [
+            _step_clip(6, 6).with_start(0.2),
+            _step_clip(4, 2).with_start(0.2),
+        ],
+        size=(1, 1),
+        use_bgclip=True,
+    )
+    np.testing.assert_array_equal(rebuilt.get_frame(t), frame)
+
+
+def test_composite_background_mask_snapped_to_its_own_grid():
+    """A masked background keeps RGB and mask on the same snapped grid."""
+    background = _step_clip(10, 10).with_mask()
+    foreground = _step_clip(7, 7, start=0.3)
+    composite = CompositeVideoClip([background, foreground], size=(1, 1), bg_color=None)
+
+    t = 0.7  # (0.7 - 0.0) * 10 drifts to 6.999..
+    rgb = composite.get_frame(t).copy()
+    mask = composite.mask.get_frame(t).copy()
+
+    rebuilt = CompositeVideoClip(
+        [_step_clip(10, 10).with_mask(), _step_clip(7, 7, start=0.3)],
+        size=(1, 1),
+        bg_color=None,
+    )
+    np.testing.assert_array_equal(rebuilt.get_frame(t), rgb)
+    np.testing.assert_allclose(rebuilt.mask.get_frame(t), mask)
+
+
 if __name__ == "__main__":
     pytest.main()

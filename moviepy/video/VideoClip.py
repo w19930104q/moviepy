@@ -718,7 +718,11 @@ class VideoClip(Clip):
         return post_array
 
     def compose_on(
-        self, background: np.ndarray, t, background_mask: Union[np.ndarray, None] = None
+        self,
+        background: np.ndarray,
+        t,
+        background_mask: Union[np.ndarray, None] = None,
+        frame_t: Union[float, None] = None,
     ) -> Tuple[np.ndarray, Union[np.ndarray, None]]:
         """Returns the result of the clip's frame at time `t` on top
         on the given `picture`, the position of the clip being given
@@ -744,6 +748,13 @@ class VideoClip(Clip):
           if the background image is transparent it must be given as a mask
           if None, the background is assumed to be fully opaque
 
+        frame_t: (float|None), default None
+          Local time (``t - self.start``) snapped to the clip's own frame grid,
+          used only to fetch the frame and mask so frame selection is
+          deterministic. Position and every other time-dependent behaviour keep
+          using the exact local time. When ``None`` the exact local time is used
+          for everything, which preserves the historical behaviour.
+
 
         Return
         -------
@@ -752,17 +763,20 @@ class VideoClip(Clip):
 
 
         """
-        ct = t - self.start  # clip time
+        # clip time (exact, used for position and other time effects)
+        ct = t - self.start
+        # frame time (snapped to the clip's frame grid, used for frame fetch)
+        frame_ct = ct if frame_t is None else frame_t
 
         # GET IMAGE AND MASK IF ANY
-        clip_frame = self.get_frame(ct).astype("uint8")
+        clip_frame = self.get_frame(frame_ct).astype("uint8")
         background_height, background_width = background.shape[:2]
         clip_height, clip_width = clip_frame.shape[:2]
         clip_mask = None
 
         if self.mask is not None:
             # Clip mask normalize to 0 (fully transparent) to 1 (fully opaque)
-            clip_mask = self.mask.get_frame(ct)
+            clip_mask = self.mask.get_frame(frame_ct)
 
             # Resize clip_mask_img to match clip_img, always use top left corner
             if clip_frame.shape[:2] != clip_mask.shape[:2]:
@@ -901,7 +915,12 @@ class VideoClip(Clip):
         bg_mask_copy[y1_bg:y2_bg, x1_bg:x2_bg] = final_alpha.squeeze()
         return (bg_copy, bg_mask_copy)
 
-    def compose_mask(self, background_mask: np.ndarray, t: float) -> np.ndarray:
+    def compose_mask(
+        self,
+        background_mask: np.ndarray,
+        t: float,
+        frame_t: Union[float, None] = None,
+    ) -> np.ndarray:
         """Returns the result of the clip's mask at time `t` composited
         on the given `background_mask`, the position of the clip being given
         by the clip's ``pos`` attribute. Meant for compositing.
@@ -915,9 +934,18 @@ class VideoClip(Clip):
 
         t:
           The time position in the clip at which to extract the mask.
+
+        frame_t: (float|None), default None
+          Local time (``t - self.start``) snapped to the clip's own frame grid,
+          used only to fetch the mask frame so frame selection is
+          deterministic. Position keeps using the exact local time. When
+          ``None`` the exact local time is used, preserving the historical
+          behaviour.
         """
-        ct = t - self.start  # clip time
-        clip_mask = self.get_frame(ct).astype("float")
+        # clip time (exact, used for position) and frame time (snapped)
+        ct = t - self.start
+        frame_ct = ct if frame_t is None else frame_t
+        clip_mask = self.get_frame(frame_ct).astype("float")
 
         # numpy shape is H*W not W*H
         bg_h, bg_w = background_mask.shape

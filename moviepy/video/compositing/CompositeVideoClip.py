@@ -7,6 +7,12 @@ import numpy as np
 from moviepy.audio.AudioClip import CompositeAudioClip
 from moviepy.video.VideoClip import ColorClip, VideoClip
 
+# Frame timings are compared with this tolerance so that floating point drift
+# (e.g. (0.7 - 0.2) * 10 == 4.999999999999999) cannot make a frame landing
+# exactly on a clip's frame boundary fetch the previous frame. It matches the
+# tolerance already used by the ffmpeg reader in ``get_frame_number``.
+FRAME_EPSILON = 1e-5
+
 
 class CompositeVideoClip(VideoClip):
     """
@@ -153,6 +159,24 @@ class CompositeVideoClip(VideoClip):
             # Memoize the mask to speed up frame generation
             self.precomputed = {}
 
+    @staticmethod
+    def _clip_time(clip, t):
+        """Local time of ``clip`` at composite time ``t``, snapped to the
+        clip's own frame grid.
+
+        Each clip is sampled according to its own ``start`` and ``fps`` rather
+        than the composite's frame grid, so the frame selected at a given
+        composite time does not depend on the order in which frames are read.
+        A small epsilon is added before rounding to absorb floating point drift
+        on exact frame boundaries (e.g. ``(0.7 - 0.2) * 10``). Clips without an
+        ``fps`` (procedural clips) keep their exact, unmodified local time.
+        """
+        clip_t = t - clip.start
+        fps = getattr(clip, "fps", None)
+        if fps:
+            clip_t = int(clip_t * fps + FRAME_EPSILON) / fps
+        return clip_t
+
     def frame_function(self, t):
         """The clips playing at time `t` are blitted over one another."""
         # For the mask we recalculate the final transparency we'll need
@@ -169,17 +193,25 @@ class CompositeVideoClip(VideoClip):
 
             mask = np.zeros((self.size[1], self.size[0]), dtype=float)
             for clip in self.playing_clips(t):
-                mask = clip.compose_mask(mask, t)
+                mask = clip.compose_mask(mask, t, frame_t=self._clip_time(clip, t))
+
+            # Only ever memoize a fully composited mask: storing intermediate
+            # results while blitting would make the returned mask depend on how
+            # many clips had already been processed (i.e. on read order).
+            if self.memoize_mask:
+                self.precomputed[t] = mask.copy()
 
             return mask
 
-        # Clip merging in pure numpy
-        bg_t = t - self.bg.start
+        # Clip merging in pure numpy. Every clip is sampled at the local time
+        # snapped to its own frame grid so compositions stay reproducible,
+        # including for clips with start offsets and different fps.
+        bg_t = self._clip_time(self.bg, t)
         bg_frame = self.bg.get_frame(bg_t).astype("uint8")
         clip_height, clip_width = bg_frame.shape[:2]
 
         if self.bg.mask:
-            bgm_t = t - self.bg.mask.start
+            bgm_t = self._clip_time(self.bg.mask, t)
             bg_mask = self.bg.mask.get_frame(bgm_t)
 
             # Resize bg_mask to match bg_frame, always use top left corner
@@ -200,11 +232,15 @@ class CompositeVideoClip(VideoClip):
         current_frame = bg_frame
         current_mask = bg_mask if self.bg.mask else None
         for clip in self.playing_clips(t):
+            clip_t = self._clip_time(clip, t)
             current_frame, current_mask = clip.compose_on(
-                current_frame, t, current_mask
+                current_frame, t, current_mask, frame_t=clip_t
             )
-            if self.mask and self.memoize_mask:
-                self.mask.precomputed[t] = current_mask
+
+        # Memoize the final, fully composited mask only. The RGB and mask
+        # compositing paths then always agree regardless of access order.
+        if self.mask and self.memoize_mask:
+            self.mask.precomputed[t] = current_mask
 
         return current_frame
 
