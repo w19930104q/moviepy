@@ -572,9 +572,42 @@ class FFmpegInfosParser:
             int(match_audio_bitrate.group(1)) if match_audio_bitrate else None
         )
 
+        block.data["nchannels"] = self._parse_audio_nchannels(block.head_line)
+
         # Store default stream, or first stream if we dont find any default
         if block.data["default"] or not self.audio_stream:
             self.audio_stream = block
+
+    @staticmethod
+    def _parse_audio_nchannels(head_line):
+        """Parses the number of channels of an audio stream from its
+        "Stream ... Audio" line, e.g. ``mono``, ``stereo``, ``5.1`` or
+        ``6 channels``. Returns ``None`` if it cannot be determined.
+        """
+        layouts = {
+            "mono": 1,
+            "stereo": 2,
+            "2.1": 3,
+            "3.0": 3,
+            "3.0(back)": 3,
+            "4.0": 4,
+            "quad": 4,
+            "5.0": 5,
+            "5.1": 6,
+            "6.0": 6,
+            "6.1": 7,
+            "7.0": 7,
+            "7.1": 8,
+        }
+        match = re.search(r"Hz, ([^,]+)", head_line)
+        if match:
+            layout = match.group(1).strip()
+            if layout in layouts:
+                return layouts[layout]
+            match_channels = re.match(r"(\d+) channels", layout)
+            if match_channels:
+                return int(match_channels.group(1))
+        return None
 
     def _parse_stream_data(self, block: InfoBlock):
         """Parses data from "Stream ... Data" line."""
@@ -721,6 +754,7 @@ class FFmpegInfosParser:
             self.result["audio_found"] = True
             self.result["audio_fps"] = self.audio_stream.data["fps"]
             self.result["audio_bitrate"] = self.audio_stream.data["bitrate"]
+            self.result["audio_nchannels"] = self.audio_stream.data.get("nchannels")
 
         if self.result["video_found"] and self.check_duration:
             if "duration" not in self.result:

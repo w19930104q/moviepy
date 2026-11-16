@@ -3,12 +3,14 @@
 import os
 import subprocess
 import time
+import wave
 
 import numpy as np
 
 import pytest
 
 from moviepy.audio.AudioClip import AudioClip
+from moviepy.audio.io.readers import FFMPEG_AudioReader
 from moviepy.config import FFMPEG_BINARY
 from moviepy.tools import ffmpeg_escape_filename
 from moviepy.video.compositing.CompositeVideoClip import clips_array
@@ -719,6 +721,100 @@ def test_seeking_beyond_file_end():
         end_of_file_frame = reader.get_frame(30)
     assert np.array_equal(frame_1, end_of_file_frame)
     assert reader.pos == 30 * 24 + 1
+
+
+def _write_wave(filepath, samples):
+    """Write a wave file from an array of shape (n_frames, nchannels)."""
+    nchannels = samples.shape[1]
+    with wave.open(filepath, "wb") as wav_file:
+        wav_file.setnchannels(nchannels)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(44100)
+        wav_file.writeframes(samples.astype("<i2").tobytes())
+
+
+@pytest.mark.parametrize("file_nchannels", [1, 2])
+@pytest.mark.parametrize("nchannels", [1, 2])
+def test_audio_reader_sequential_and_seek_reads_match(
+    util, file_nchannels, nchannels
+):
+    """Seeking in ``FFMPEG_AudioReader`` must yield exactly the same samples
+    as reading the file sequentially, in both forward and backward
+    directions, even when direct ``read_chunk``/``seek`` calls moved the
+    stream away from the position the internal buffer expects (which used
+    to corrupt the buffer and return wrong data).
+    """
+    fps = 44100
+    duration = 2.0
+    n_frames = int(fps * duration)
+    # Each sample encodes its own index (mod 30000), so any position in
+    # the file is uniquely identifiable from its value.
+    ramp = ((np.arange(n_frames) % 30000) - 15000).astype("<i2")
+    if file_nchannels == 1:
+        samples = ramp.reshape((-1, 1))
+    else:
+        # right channel is the same ramp shifted by 7 frames
+        samples = np.empty((n_frames, 2), dtype="<i2")
+        samples[:, 0] = ramp
+        samples[:, 1] = ((np.arange(n_frames) + 7) % 30000) - 15000
+
+    filepath = os.path.join(
+        util.TMP_DIR, f"audio_reader_seeking_{file_nchannels}ch.wav"
+    )
+    _write_wave(filepath, samples)
+
+    reader = FFMPEG_AudioReader(
+        filepath, buffersize=2000, fps=fps, nbytes=2, nchannels=nchannels
+    )
+    try:
+        # Ground truth: read the whole file sequentially. This also leaves
+        # the stream at EOF with a stale buffer, which used to make later
+        # buffered reads return garbage.
+        reader.seek(0)
+        sequential = []
+        pos = 0
+        while pos < n_frames:
+            chunksize = min(3000, n_frames - pos)
+            sequential.append(reader.read_chunk(chunksize))
+            pos += chunksize
+        sequential = np.concatenate(sequential)
+        # samples decoded to floats must be an exact representation of
+        # the source samples (mono <-> stereo conversions included)
+        if nchannels == 1 and file_nchannels == 2:
+            expected = samples.mean(axis=1, keepdims=True) / 2**15
+        elif nchannels == 2 and file_nchannels == 1:
+            expected = np.repeat(samples, 2, axis=1) / 2**15
+        else:
+            expected = samples / 2**15
+        assert np.allclose(sequential, expected, atol=1e-7)
+
+        sequential = np.round(sequential * 2**15).astype(int)
+        expected_int = np.round(expected * 2**15).astype(int)
+
+        # Random positions, visited forward then backward
+        rng = np.random.default_rng(18972)
+        positions = rng.integers(0, n_frames, size=200)
+        positions = np.concatenate([np.sort(positions), np.sort(positions)[::-1]])
+        for pos in positions:
+            tt = pos / fps
+
+            # low-level seek + read
+            reader.seek(pos)
+            frame = np.round(reader.read_chunk(1)[0] * 2**15).astype(int)
+            assert np.array_equal(frame, expected_int[pos])
+
+            # buffered access by time (same index computation as get_frame)
+            ind = int(reader.fps * tt)
+            frame = np.round(reader.get_frame(tt) * 2**15).astype(int)
+            assert np.array_equal(frame, expected_int[ind])
+
+        # Access by array of timestamps after a backward seek
+        tt = positions[:50] / fps
+        frames = np.round(reader.get_frame(tt) * 2**15).astype(int)
+        inds = np.round(reader.fps * tt).astype(int)
+        assert np.array_equal(frames, expected_int[inds])
+    finally:
+        reader.close()
 
 
 def test_release_of_file_via_close(util):

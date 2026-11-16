@@ -70,6 +70,18 @@ class FFMPEG_AudioReader:
         self.proc = None
         self.audio_stream_index = audio_stream_index
 
+        # Number of channels ffmpeg is asked to decode to. Remixing channels
+        # in ffmpeg (e.g. mono -> stereo) is avoided because some ffmpeg
+        # builds do not keep the stream sample-aligned when remixing, which
+        # breaks both reading and seeking accuracy. Instead, mono/stereo
+        # files are decoded at their native channel count and converted to
+        # ``self.nchannels`` in ``read_chunk``.
+        source_nchannels = infos.get("audio_nchannels")
+        if source_nchannels in (1, 2) and nchannels in (1, 2):
+            self.source_nchannels = source_nchannels
+        else:
+            self.source_nchannels = nchannels
+
         self.n_frames = int(self.fps * self.duration)
         self.buffersize = min(self.n_frames + 1, buffersize)
         self.buffer = None
@@ -110,7 +122,7 @@ class FFMPEG_AudioReader:
                 "-ar",
                 "%d" % self.fps,
                 "-ac",
-                "%d" % self.nchannels,
+                "%d" % self.source_nchannels,
                 "-",
             ]
         )
@@ -126,7 +138,7 @@ class FFMPEG_AudioReader:
 
         self.proc = sp.Popen(cmd, **popen_params)
 
-        self.pos = np.round(self.fps * start_time)
+        self.pos = int(round(self.fps * start_time))
 
     def skip_chunk(self, chunksize):
         """Skip a chunk of audio data by reading and discarding the specified number of
@@ -138,9 +150,24 @@ class FFMPEG_AudioReader:
         chunksize (int):
           The number of audio frames to skip.
         """
-        _ = self.proc.stdout.read(self.nchannels * chunksize * self.nbytes)
+        _ = self.proc.stdout.read(self.source_nchannels * chunksize * self.nbytes)
         self.proc.stdout.flush()
         self.pos = self.pos + chunksize
+
+    def _convert_channels(self, frames):
+        """Converts frames from the decoded (source) channel count to the
+        requested number of channels ``self.nchannels``.
+
+        Only mono <-> stereo conversions are handled here (other cases are
+        left to ffmpeg, see ``__init__``).
+        """
+        if self.source_nchannels == self.nchannels:
+            return frames
+        if self.source_nchannels == 1:
+            # mono -> stereo: duplicate the channel
+            return np.repeat(frames, self.nchannels, axis=1)
+        # stereo -> mono: average both channels
+        return frames.mean(axis=1).reshape((-1, 1))
 
     def read_chunk(self, chunksize):
         """Read a chunk of audio data from the audio stream.
@@ -161,15 +188,16 @@ class FFMPEG_AudioReader:
         """
         # chunksize is not being autoconverted from float to int
         chunksize = int(round(chunksize))
-        s = self.proc.stdout.read(self.nchannels * chunksize * self.nbytes)
+        s = self.proc.stdout.read(self.source_nchannels * chunksize * self.nbytes)
         data_type = {1: "int8", 2: "int16", 4: "int32"}[self.nbytes]
         if hasattr(np, "frombuffer"):
             result = np.frombuffer(s, dtype=data_type)
         else:
             result = np.fromstring(s, dtype=data_type)
         result = (1.0 * result / 2 ** (8 * self.nbytes - 1)).reshape(
-            (int(len(result) / self.nchannels), self.nchannels)
+            (int(len(result) / self.source_nchannels), self.source_nchannels)
         )
+        result = self._convert_channels(result)
 
         # Pad the read chunk with zeros when there isn't enough audio
         # left to read, so the buffer is always at full length.
@@ -230,17 +258,27 @@ class FFMPEG_AudioReader:
             # we avoid that by recursively calling this function on smaller length
             # and concatenate the results:w
             max_frame_threshold = fr_min + self.buffersize // 2
-            threshold_idx = np.searchsorted(frames, max_frame_threshold, side="right")
-            if threshold_idx != len(frames):
-                in_time_head = in_time[0:threshold_idx]
-                in_time_tail = in_time[threshold_idx:]
-                return np.concatenate(
-                    [self.get_frame(in_time_head), self.get_frame(in_time_tail)]
-                )
+            if fr_max > max_frame_threshold:
+                # The requested frames don't all fit in the buffer: split
+                # the in-range timestamps by frame value (so the split is
+                # valid whatever the order of ``tt``) and recurse on both
+                # halves.
+                tt_in_time = tt[in_time]
+                frames_in_time = np.round((self.fps * tt_in_time)).astype(int)
+                head = frames_in_time <= max_frame_threshold
+                result = np.zeros((len(tt), self.nchannels))
+                result_in_time = np.zeros((len(tt_in_time), self.nchannels))
+                result_in_time[head] = self.get_frame(tt_in_time[head])
+                result_in_time[~head] = self.get_frame(tt_in_time[~head])
+                result[in_time] = result_in_time
+                return result
 
             if not (0 <= (fr_min - self.buffer_startframe) < len(self.buffer)):
                 self.buffer_around(fr_min)
-            elif not (0 <= (fr_max - self.buffer_startframe) < len(self.buffer)):
+            # not an ``elif``: re-centering on ``fr_min`` may have left
+            # ``fr_max`` out of the buffer (e.g. when the frames span
+            # exactly ``buffersize // 2``), so it must be re-checked.
+            if not (0 <= (fr_max - self.buffer_startframe) < len(self.buffer)):
                 self.buffer_around(fr_max)
 
             try:
@@ -283,8 +321,16 @@ class FFMPEG_AudioReader:
 
         if self.buffer is not None:
             current_f_end = self.buffer_startframe + self.buffersize
-            if new_bufferstart < current_f_end < new_bufferstart + self.buffersize:
-                # We already have part of what must be read
+            if (
+                new_bufferstart < current_f_end < new_bufferstart + self.buffersize
+                and self.pos == current_f_end
+            ):
+                # We already have part of what must be read, and the stream
+                # is positioned right after the buffered frames, so we can
+                # keep the overlapping part and only read what is missing.
+                # (``self.pos != current_f_end`` means the stream was moved
+                # by a direct call to ``seek``/``read_chunk``/``skip_chunk``
+                # and is no longer contiguous with the buffer.)
                 conserved = current_f_end - new_bufferstart
                 chunksize = self.buffersize - conserved
                 array = self.read_chunk(chunksize)
