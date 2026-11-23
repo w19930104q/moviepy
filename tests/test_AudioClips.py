@@ -220,5 +220,46 @@ def test_audioclip_stereo_max_volume(nchannels, channel_muted):
                 assert channel_max_volume > 0
 
 
+@pytest.mark.parametrize(
+    ("duration", "fps", "expected_n_frames"),
+    (
+        (1, 44100, 44100),
+        # fps * duration is not an exact integer: the sample count must be
+        # rounded to the nearest sample instead of being truncated, so the
+        # audio stream keeps the same length as the video stream.
+        (1, 22050 * 0.999, round(22050 * 0.999)),
+        (0.99999, 44100, round(0.99999 * 44100)),
+        (2.5, 44100, round(2.5 * 44100)),
+    ),
+)
+def test_audioclip_iter_chunks_sample_count(mono_wave, duration, fps, expected_n_frames):
+    clip = AudioClip(mono_wave(), duration=duration, fps=fps)
+    rendered = np.concatenate(
+        tuple(clip.iter_chunks(chunksize=50000, quantize=False, fps=fps))
+    )
+    assert len(rendered) == expected_n_frames
+    assert len(clip.to_soundarray(fps=fps)) == expected_n_frames
+
+
+def test_audiofileclip_rounds_sample_count(util, mono_wave):
+    """A written audio file must read back with its full sample count:
+    truncating made the audio reader report one sample fewer and left the
+    audio stream longer than a frame-rounded video stream.
+    """
+    fps = 44100
+    duration = 1.0
+    filename = os.path.join(util.TMP_DIR, "rounded_sample_count.wav")
+    AudioClip(mono_wave(), duration=duration, fps=fps).write_audiofile(
+        filename, fps=fps, logger=None
+    )
+
+    clip = AudioFileClip(filename)
+    try:
+        assert clip.reader.n_frames == round(fps * duration)
+        assert abs(clip.duration - duration) < 0.01
+    finally:
+        clip.close()
+
+
 if __name__ == "__main__":
     pytest.main()

@@ -14,7 +14,7 @@ from moviepy.audio.io.ffmpeg_audiowriter import ffmpeg_audiowrite
 from moviepy.audio.io.ffplay_audiopreviewer import ffplay_audiopreview
 from moviepy.Clip import Clip
 from moviepy.decorators import convert_path_to_string, requires_duration
-from moviepy.tools import extensions_dict
+from moviepy.tools import extensions_dict, round_count
 
 
 class AudioClip(Clip):
@@ -99,7 +99,11 @@ class AudioClip(Clip):
         if chunk_duration is not None:
             chunksize = int(chunk_duration * fps)
 
-        total_size = int(fps * self.duration)
+        # Round to the nearest sample so that the rendered audio stream has
+        # the same length as the corresponding video stream (whose frame
+        # count is also rounded), instead of silently dropping the last
+        # sample of every clip.
+        total_size = round_count(fps * self.duration)
 
         nchunks = total_size // chunksize + 1
 
@@ -148,7 +152,10 @@ class AudioClip(Clip):
                     )
                 )
             else:
-                tt = np.arange(0, self.duration, 1.0 / fps)
+                # Round the sample count instead of relying on arange's
+                # half-open interval, which would drop the last sample when
+                # duration * fps is not an exact integer.
+                tt = (1.0 / fps) * np.arange(round_count(self.duration * fps))
         """
         elif len(tt)> 1.5*buffersize:
             nchunks = int(len(tt)/buffersize+1)

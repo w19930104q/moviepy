@@ -23,11 +23,83 @@ def test_aspect_ratio():
         (1, 60, 60),
         (0.1, 100, 10),
         (2.4, 60, 144),
+        # Fractional fps: the frame count must be rounded to the nearest
+        # integer instead of being truncated (see issue with 23.976 fps
+        # footage losing one frame per second).
+        (1, 24000 / 1001, 24),
+        (0.5, 24000 / 1001, 12),
+        (1, 30000 / 1001, 30),
+        (2.5, 24000 / 1001, 60),
     ),
 )
 def test_n_frames(duration, fps, expected_n_frames):
     clip = VideoClip(duration=duration).with_fps(fps)
     assert clip.n_frames == expected_n_frames
+
+
+@pytest.mark.parametrize(
+    ("duration", "fps", "expected_n_frames"),
+    (
+        (1, 24000 / 1001, 24),
+        (0.5, 24000 / 1001, 12),
+        (1, 30000 / 1001, 30),
+    ),
+)
+def test_iter_frames_rounds_fractional_fps(duration, fps, expected_n_frames):
+    clip = ColorClip((64, 64), color=(0, 0, 0), duration=duration).with_fps(fps)
+    assert sum(1 for _ in clip.iter_frames()) == expected_n_frames
+
+
+def test_write_videofile_fractional_fps_keeps_frames(util):
+    """A 1-second clip at 23.976 fps must be written with 24 frames and read
+    back with a duration of about 1 second, not 23 frames / 0.96 seconds.
+    """
+    fps = 24000 / 1001
+    location = os.path.join(util.TMP_DIR, "fractional_fps.mp4")
+    clip = ColorClip((320, 240), color=(255, 0, 0), duration=1).with_fps(fps)
+    clip.write_videofile(location, codec="libx264", audio=False, logger=None)
+
+    with VideoFileClip(location) as result:
+        assert result.reader.n_frames == 24
+        assert result.n_frames == 24
+        assert abs(result.duration - 1.0) < 0.05
+
+
+def test_subclipped_fractional_fps_rounds_frame_count(util):
+    """A 0.5-second subclip of 23.976 fps footage must keep 12 frames."""
+    fps = 24000 / 1001
+    location = os.path.join(util.TMP_DIR, "fractional_fps_subclip.mp4")
+    clip = ColorClip((320, 240), color=(0, 255, 0), duration=1).with_fps(fps)
+    subclip = clip.subclipped(0, 0.5)
+    assert subclip.n_frames == 12
+    subclip.write_videofile(location, codec="libx264", audio=False, logger=None)
+
+    with VideoFileClip(location) as result:
+        assert result.n_frames == 12
+        assert abs(result.duration - 0.5) < 0.05
+
+
+def test_write_videofile_fractional_fps_audio_video_lengths(util, mono_wave):
+    """With audio, the written video and audio streams must have matching
+    lengths (within one frame), instead of the video stream being one frame
+    shorter than the audio.
+    """
+    fps = 24000 / 1001
+    location = os.path.join(util.TMP_DIR, "fractional_fps_audio.mp4")
+    audio = AudioClip(mono_wave(), duration=1, fps=44100)
+    clip = (
+        ColorClip((320, 240), color=(0, 0, 255), duration=1)
+        .with_fps(fps)
+        .with_audio(audio)
+    )
+    clip.write_videofile(
+        location, codec="libx264", audio_codec="aac", logger=None
+    )
+
+    with VideoFileClip(location) as result:
+        assert result.n_frames == 24
+        assert result.audio is not None
+        assert abs(result.audio.duration - result.duration) < 0.05
 
 
 def test_with_audio(stereo_wave):

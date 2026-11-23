@@ -13,6 +13,7 @@ from moviepy.tools import (
     convert_to_seconds,
     cross_platform_popen_params,
     ffmpeg_escape_filename,
+    round_count,
 )
 from moviepy.video.io.errors import VideoCorruptedError
 
@@ -727,7 +728,10 @@ class FFmpegInfosParser:
                 raise self.ParseDurationError()
 
             self.result["video_duration"] = self.result["duration"]
-            self.result["video_n_frames"] = int(
+            # Round to the nearest frame: at fractional fps like 23.976,
+            # truncating would report one frame fewer than the file actually
+            # contains and make the reader's duration come out too short.
+            self.result["video_n_frames"] = round_count(
                 self.result["duration"] * self.result.get("video_fps", 0)
             )
         else:

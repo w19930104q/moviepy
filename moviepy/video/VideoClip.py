@@ -34,7 +34,12 @@ from moviepy.decorators import (
     requires_fps,
     use_clip_fps_by_default,
 )
-from moviepy.tools import compute_position, extensions_dict, find_extension
+from moviepy.tools import (
+    compute_position,
+    extensions_dict,
+    find_extension,
+    round_count,
+)
 from moviepy.video.fx.Crop import Crop
 from moviepy.video.fx.Resize import Resize
 from moviepy.video.fx.Rotate import Rotate
@@ -140,7 +145,7 @@ class VideoClip(Clip):
     @requires_fps
     def n_frames(self):
         """Returns the number of frames of the video."""
-        return int(self.duration * self.fps)
+        return round_count(self.duration * self.fps)
 
     def __copy__(self):
         """Mixed copy of the clip.
@@ -457,7 +462,9 @@ class VideoClip(Clip):
         # Fails on GitHub macos CI
         # logger(message="MoviePy - Writing frames %s." % name_format)
 
-        timings = np.arange(0, self.duration, 1.0 / fps)
+        # Round to the nearest frame instead of using arange's half-open
+        # interval, which would write one image fewer for fractional fps.
+        timings = (1.0 / fps) * np.arange(round_count(self.duration * fps))
 
         filenames = []
         for i, t in logger.iter_bar(t=list(enumerate(timings))):

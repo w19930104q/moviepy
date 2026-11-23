@@ -11,6 +11,24 @@ import proglog
 OS_NAME = os.name
 
 
+def round_count(value):
+    """Round a frame/sample count to the nearest integer.
+
+    ``duration * fps`` is conceptually an integer number of frames, but it is
+    computed in floating point and can land slightly below the true integer
+    (e.g. a 1-second clip at 23.976 fps gives ``23.976...``) or slightly below
+    an integer because of numerical imprecision (e.g. ``1838.9999999999998``
+    instead of ``1839``). A plain ``round()`` would get the second case wrong.
+
+    Values within a small epsilon of an integer are therefore snapped to that
+    integer; everything else is rounded to the nearest integer.
+    """
+    nearest = round(value)
+    if abs(value - nearest) < 1e-6:
+        return nearest
+    return int(value + 0.5) if value >= 0 else int(value - 0.5)
+
+
 def cross_platform_popen_params(popen_params):
     """Wrap with this function a dictionary of ``subprocess.Popen`` kwargs and
     will be ready to work without unexpected behaviours in any platform.

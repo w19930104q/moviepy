@@ -23,6 +23,7 @@ from moviepy.decorators import (
     requires_duration,
     use_clip_fps_by_default,
 )
+from moviepy.tools import round_count
 
 
 class Clip:
@@ -555,11 +556,13 @@ class Clip:
                   for frame in myclip.iter_frames()])
         """
         logger = proglog.default_bar_logger(logger)
+        # Round to the nearest frame instead of truncating: for fractional
+        # fps like 23.976, a 1-second clip holds 23.976... frames, i.e. 24,
+        # not 23. Truncation silently dropped the last frame and shortened
+        # every written file.
         for frame_index in logger.iter_bar(
-            frame_index=np.arange(0, int(self.duration * fps))
+            frame_index=np.arange(0, round_count(self.duration * fps))
         ):
-            # int is used to ensure that floating point errors are rounded
-            # down to the nearest integer
             t = frame_index / fps
 
             frame = self.get_frame(t)

@@ -6,7 +6,11 @@ import warnings
 import numpy as np
 
 from moviepy.config import FFMPEG_BINARY
-from moviepy.tools import cross_platform_popen_params, ffmpeg_escape_filename
+from moviepy.tools import (
+    cross_platform_popen_params,
+    ffmpeg_escape_filename,
+    round_count,
+)
 from moviepy.video.io.ffmpeg_reader import ffmpeg_parse_infos
 
 
@@ -70,7 +74,10 @@ class FFMPEG_AudioReader:
         self.proc = None
         self.audio_stream_index = audio_stream_index
 
-        self.n_frames = int(self.fps * self.duration)
+        # Round to the nearest sample instead of truncating, so the reader
+        # reports the full stream length (matching the video stream length)
+        # even when fps * duration is not an exact integer.
+        self.n_frames = round_count(self.fps * self.duration)
         self.buffersize = min(self.n_frames + 1, buffersize)
         self.buffer = None
         self.buffer_startframe = 1
