@@ -12,6 +12,7 @@ For performances reason a very minor change to the API of CompositeVideoClip hav
 This mean you need to specifically set `bg_color=None` if you want to generate a video with a transparent background.
 
 ### Fixed
+- Fix `VideoFileClip` reporting the container duration and frame count instead of the video stream ones when another stream (e.g. audio) is longer than the video stream, which also caused empty-frame warnings when iterating over the frames
 - Strongly improve performances to make them more consistent with thoses of v1
 - Fix circular reference in ImageSequenceClip leading to memory leak
 - Fix TextClip broken with Pillow > 11.2

@@ -673,6 +673,16 @@ class FFmpegInfosParser:
             "end": float(end),
         }
 
+    def _parse_video_n_frames(self):
+        """Parses the number of frames of the video stream from the stats
+        lines (``frame=   12``) printed by ffmpeg while demuxing or decoding
+        the file. Returns ``None`` if no such line is found.
+        """
+        n_frames = None
+        for match in re.finditer(r"\bframe=\s*(\d+)", self.infos):
+            n_frames = int(match.group(1))
+        return n_frames
+
     def _parse_blocks(self, root: InfoBlock):
         for key, data in root.data.items():
             if key == "Duration":
@@ -726,10 +736,21 @@ class FFmpegInfosParser:
             if "duration" not in self.result:
                 raise self.ParseDurationError()
 
-            self.result["video_duration"] = self.result["duration"]
-            self.result["video_n_frames"] = int(
-                self.result["duration"] * self.result.get("video_fps", 0)
-            )
+            video_n_frames = self._parse_video_n_frames()
+            if video_n_frames and self.result.get("video_fps"):
+                # The frames of the video stream have been counted by ffmpeg
+                # itself: derive the duration of the video stream from its
+                # real frame count, as the container duration can be longer
+                # (e.g. when another stream, like the audio one, is longer).
+                self.result["video_n_frames"] = video_n_frames
+                self.result["video_duration"] = (
+                    video_n_frames / self.result["video_fps"]
+                )
+            else:
+                self.result["video_duration"] = self.result["duration"]
+                self.result["video_n_frames"] = int(
+                    self.result["duration"] * self.result.get("video_fps", 0)
+                )
         else:
             self.result["video_n_frames"] = 0
             self.result["video_duration"] = 0.0
@@ -862,8 +883,11 @@ def ffmpeg_parse_infos(
     - ``"video_rotation"``
     - ``"video_size"``
 
-    Note that "video_duration" is slightly smaller than "duration" to avoid
-    fetching the incomplete frames at the end, which raises an error.
+    Note that "video_duration" and "video_n_frames" describe the video
+    stream itself, and can be smaller than what the container "duration"
+    would suggest, e.g. when another stream (like the audio one) is longer
+    than the video stream. They are derived from the real number of frames
+    of the video stream, counted by ffmpeg while demuxing it.
 
     Parameters
     ----------
@@ -890,6 +914,13 @@ def ffmpeg_parse_infos(
     cmd = [FFMPEG_BINARY, "-hide_banner", "-i", ffmpeg_escape_filename(filename)]
     if decode_file:
         cmd.extend(["-f", "null", "-"])
+    elif check_duration:
+        # Demux (without decoding) the first video stream, if any, so that
+        # its frames can be counted from the final stats line printed by
+        # ffmpeg. This gives access to the real duration of the video
+        # stream, which can be shorter than the container duration (e.g.
+        # when the audio stream is longer than the video stream).
+        cmd.extend(["-map", "0:v:0?", "-c", "copy", "-f", "null", "-"])
 
     popen_params = cross_platform_popen_params(
         {

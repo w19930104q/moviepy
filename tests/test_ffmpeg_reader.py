@@ -3,6 +3,7 @@
 import os
 import subprocess
 import time
+import warnings
 
 import numpy as np
 
@@ -346,6 +347,59 @@ def test_correct_video_rotation(util):
     d = ffmpeg_parse_infos(corrected_rotation_filename)
     assert "video_rotation" not in d
     assert d["video_size"] == [1080, 1920]
+
+
+def test_ffmpeg_parse_infos_video_stream_duration(util):
+    """The video stream must be exposed with its own duration and frame
+    count, not with the container ones, which can be larger when another
+    stream is longer (e.g. a 1-second video with a 2-second audio).
+    """
+    filepath = os.path.join(
+        util.TMP_DIR, "ffmpeg_parse_infos_video_stream_duration.mp4"
+    )
+    cmd = [
+        FFMPEG_BINARY,
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=red:s=16x16:r=12:d=1",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:sample_rate=44100:duration=2",
+        "-c:v",
+        "libx264",
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        ffmpeg_escape_filename(filepath),
+    ]
+    with open(os.devnull, "w") as stderr:
+        subprocess.check_call(cmd, stderr=stderr)
+
+    d = ffmpeg_parse_infos(filepath)
+    assert d["duration"] == 2.0
+    assert d["video_duration"] == 1.0
+    assert d["video_n_frames"] == 12
+
+    with VideoFileClip(filepath) as clip:
+        assert clip.duration == 1.0
+        assert clip.reader.n_frames == 12
+
+        with warnings.catch_warnings(record=True) as caught_warnings:
+            warnings.simplefilter("always")
+            frames = list(clip.iter_frames())
+
+        assert len(frames) == 12
+        assert not [
+            warning
+            for warning in caught_warnings
+            if "bytes wanted" in str(warning.message)
+        ]
+        # every frame must have been really decoded (no 0-byte reads)
+        assert all(frame.shape == (16, 16, 3) for frame in frames)
 
 
 def test_ffmpeg_parse_infos_multiline_metadata():
