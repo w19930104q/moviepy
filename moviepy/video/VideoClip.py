@@ -376,7 +376,14 @@ class VideoClip(Clip):
         # enough_cpu = (multiprocessing.cpu_count() > 1)
         logger(message="MoviePy - Building video %s." % filename)
         if make_audio:
-            self.audio.write_audiofile(
+            audio = self.audio
+            if audio.duration is not None and audio.duration > self.duration:
+                # The soundtrack must not outlast the video, otherwise the
+                # container duration would be inflated by the audio stream
+                # and readers would report more video frames than the file
+                # really contains. Cut the audio to the clip's duration.
+                audio = audio.subclipped(0, self.duration)
+            audio.write_audiofile(
                 audiofile,
                 audio_fps,
                 audio_nbytes,

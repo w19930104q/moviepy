@@ -2,6 +2,7 @@
 
 import multiprocessing
 import os
+import warnings
 
 from PIL import Image
 
@@ -259,3 +260,30 @@ def test_write_file_with_spaces(util):
     filename = os.path.join(util.TMP_DIR, "name with spaces.mp4")
     clip = ColorClip((1, 1), color=1, is_mask=True).with_fps(1).with_duration(0.3)
     ffmpeg_write_video(clip, filename, fps=1)
+
+
+def test_write_videofile_audio_longer_than_video(util, mono_wave):
+    """A soundtrack longer than the video must not inflate the video.
+
+    The audio is cut to the clip's duration so that the written file
+    contains exactly the frames of the video, all of them readable.
+    """
+    filename = os.path.join(util.TMP_DIR, "audio_longer_than_video.mp4")
+
+    audio = AudioClip(mono_wave(440), fps=22050, duration=2)
+    clip = ColorClip((64, 64), color=(255, 0, 0)).with_duration(1).with_audio(audio)
+    clip.write_videofile(filename, fps=24, logger=None)
+
+    result = VideoFileClip(filename)
+    assert result.duration == 1
+    assert result.reader.n_frames == 24
+
+    # every frame of the file must be readable, without any
+    # "Using the last valid frame instead" fallback
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", UserWarning)
+        frames = list(result.iter_frames())
+    assert len(frames) == 24
+
+    result.close()
+    clip.close()
