@@ -45,7 +45,7 @@ MoviePy usually accept duration and timepoint as either:
 * a ``tuple`` with ``(minutes, seconds)`` or ``(hours, minutes, seconds)``.
 * a ``string`` such as ``'00:03:50.54'``.
 
-Also, you can usually provide negative times, indicating a time from the end of the clip. For example, ``clip.subclipped(-20, -10)`` cuts the clip between 20s before the end and 10s before the end.
+Also, you can usually provide negative times, indicating a time from the end of the clip. For example, ``clip.subclipped(-20, -10)`` cuts the clip between 20s before the end and 10s before the end. Negative times require the clip to have a ``duration`` and are converted before the interval is checked: if the converted end is not strictly after the converted start, ``subclipped`` raises a ``ValueError`` rather than returning a clip with a non-positive duration.
 
 
 Modify a clip using the ``with_*`` methods

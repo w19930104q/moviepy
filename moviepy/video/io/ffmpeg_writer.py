@@ -279,6 +279,16 @@ def ffmpeg_write_video(
     """
     logger = proglog.default_bar_logger(logger)
 
+    if clip.duration is None:
+        raise ValueError("Attribute 'duration' not set")
+    if clip.duration <= 0:
+        raise ValueError(
+            "Cannot write a video clip with a non-positive duration "
+            "(here %.02f seconds): it has no frames to render and would only "
+            "produce an empty file. Check the clip's start and end times."
+            % clip.duration
+        )
+
     if write_logfile:
         logfile = open(filename + ".log", "w+")
     else:

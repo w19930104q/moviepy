@@ -412,17 +412,38 @@ class Clip:
 
           If ``end_time`` is provided or if the clip has a duration attribute,
           the duration of the returned clip is set automatically.
+
+        Raises
+        ------
+
+        ValueError
+          If a negative ``start_time`` or ``end_time`` is given for a clip
+          without a ``duration``, if ``start_time`` is outside the clip, or if
+          the resulting interval is empty or inverted (``end_time`` earlier
+          than ``start_time`` once negative times have been converted).
         """
         if start_time < 0:
             # Make this more Python-like, a negative value means to move
             # backward from the end of the clip
-            start_time = self.duration + start_time  # Remember start_time is negative
+            if self.duration is None:
+                raise ValueError(
+                    "Subclip with a negative start_time (here %.02f) can only "
+                    "be extracted from clips with a ``duration``." % start_time
+                )
+            # Remember start_time is negative
+            start_time = self.duration + start_time
 
         if (self.duration is not None) and (start_time >= self.duration):
             raise ValueError(
                 "start_time (%.02f) " % start_time
                 + "should be smaller than the clip's "
                 + "duration (%.02f)." % self.duration
+            )
+
+        if start_time < 0:
+            raise ValueError(
+                "start_time (%.02f) should not be smaller than the clip's "
+                "start (0)." % start_time
             )
 
         new_clip = self.time_transform(lambda t: t + start_time, apply_to=[])
@@ -450,6 +471,19 @@ class Clip:
                     "end_time (%.02f) " % end_time
                     + "should be smaller or equal to the clip's "
                     + "duration (%.02f)." % self.duration
+                )
+
+            if end_time <= start_time:
+                # Negative times have already been converted above, so an
+                # inverted interval here means the user asked for an empty
+                # or backwards subclip (e.g. subclipped(-0.5, 1) on a short
+                # clip). Refuse it instead of producing a negative-duration
+                # clip with no frames.
+                raise ValueError(
+                    "end_time (%.02f) should be strictly greater than "
+                    "start_time (%.02f): the resulting subclip would have a "
+                    "non-positive duration (%.02f)."
+                    % (end_time, start_time, end_time - start_time)
                 )
 
             new_clip.duration = end_time - start_time

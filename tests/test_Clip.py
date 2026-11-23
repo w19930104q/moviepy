@@ -180,9 +180,15 @@ def test_clip_copy(copy_func):
         (3, 0, 2, 2),
         (3, 1, 2, 1),
         (3, -2, 2, 1),  # negative start_time
+        (3, -2, None, 2),  # negative start_time, end_time defaults to duration
+        (3, -0.5, None, 0.5),  # negative start_time measured from the end
         (3, 4, None, ValueError),  # start_time > duration
         (3, 3, None, ValueError),  # start_time == duration
         (3, 1, -1, 1),  # negative end_time
+        (3, -0.5, 1, ValueError),  # inverted interval once start is converted
+        (3, 2, 2, ValueError),  # zero-duration interval
+        (3, 2, 1, ValueError),  # inverted interval
+        (None, -1, None, ValueError),  # negative start_time without duration
         (None, 1, -1, ValueError),  # negative end_time for clip without duration
         (1, 0, 2, ValueError),  # end_time after video end should raise exception
     ),
@@ -198,7 +204,7 @@ def test_clip_subclip(duration, start_time, end_time, expected_duration):
             clip.subclipped(start_time=start_time, end_time=end_time)
     else:
         sub_clip = clip.subclipped(start_time=start_time, end_time=end_time)
-        assert sub_clip.duration == expected_duration
+        assert sub_clip.duration == pytest.approx(expected_duration)
 
 
 @pytest.mark.parametrize(

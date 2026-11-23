@@ -30,6 +30,22 @@ def test_audioclip(util, mono_wave):
     # assert clip.reader.bitrate == 16
 
 
+@pytest.mark.parametrize("bad_duration", (0, -1.5))
+def test_audioclip_write_rejects_non_positive_duration(util, bad_duration):
+    """A clip without samples must fail loudly and never leave an empty file."""
+    filename = os.path.join(util.TMP_DIR, f"audioclip_empty_{bad_duration}.wav")
+    if os.path.exists(filename):
+        os.remove(filename)
+
+    audio = AudioArrayClip(np.zeros((10, 2), dtype="float32"), fps=22050)
+    audio.duration = bad_duration
+
+    with pytest.raises(ValueError, match="non-positive duration"):
+        audio.write_audiofile(filename, logger=None)
+
+    assert not os.path.exists(filename)
+
+
 def test_audioclip_io(util):
     filename = os.path.join(util.TMP_DIR, "random.wav")
 

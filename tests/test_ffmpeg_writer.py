@@ -259,3 +259,24 @@ def test_write_file_with_spaces(util):
     filename = os.path.join(util.TMP_DIR, "name with spaces.mp4")
     clip = ColorClip((1, 1), color=1, is_mask=True).with_fps(1).with_duration(0.3)
     ffmpeg_write_video(clip, filename, fps=1)
+
+
+@pytest.mark.parametrize("bad_duration", (0, -1.5))
+def test_ffmpeg_write_video_rejects_non_positive_duration(util, bad_duration):
+    """A clip without frames must fail loudly and never leave an empty file."""
+    filename = os.path.join(
+        util.TMP_DIR, f"moviepy_empty_{str(bad_duration).replace('-', 'm')}.mp4"
+    )
+    if os.path.isfile(filename):
+        os.remove(filename)
+
+    clip = (
+        ColorClip((2, 2), color=(0, 0, 0))
+        .with_fps(1)
+        .with_duration(bad_duration)
+    )
+
+    with pytest.raises(ValueError, match="non-positive duration"):
+        ffmpeg_write_video(clip, filename, fps=1)
+
+    assert not os.path.isfile(filename)

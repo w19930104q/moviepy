@@ -206,6 +206,15 @@ def ffmpeg_audiowrite(
         logfile = None
     logger = proglog.default_bar_logger(logger)
     logger(message="MoviePy - Writing audio in %s" % filename)
+
+    if clip.duration <= 0:
+        raise ValueError(
+            "Cannot write an audio clip with a non-positive duration "
+            "(here %.02f seconds): it has no samples to render and would only "
+            "produce an empty file. Check the clip's start and end times."
+            % clip.duration
+        )
+
     writer = FFMPEG_AudioWriter(
         filename,
         fps,
